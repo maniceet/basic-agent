@@ -39,6 +39,12 @@ def add_numbers(a: int, b: int) -> int:
     return a + b
 
 
+@tool
+def multiply_numbers(a: int, b: int) -> int:
+    """Multiply two numbers together."""
+    return a * b
+
+
 @patch("basic_agent.agent.get_provider")
 def test_agent_simple_text_response(mock_get_provider):
     mock_provider = MagicMock()
@@ -434,3 +440,51 @@ def test_memory_update_false_skips_update(mock_psycopg, mock_get_provider):
     assert result == "Hello Alice!"
     # Only one provider.chat call (no memory update call)
     assert mock_provider.chat.call_count == 1
+
+
+# ---- Parallel tool execution tests ----
+
+
+@patch("basic_agent.agent.get_provider")
+def test_agent_parallel_tool_execution(mock_get_provider):
+    """Verify that multiple tool calls in one response are executed and results returned in order."""
+    mock_provider = MagicMock()
+    mock_provider.provider_name = "anthropic"
+    mock_provider.model_name = "claude-sonnet-4-20250514"
+
+    # First call: model requests two tools at once
+    first_response = ProviderResponse(
+        text=None,
+        tool_calls=[
+            ToolCall(id="call_add", name="add_numbers", input={"a": 2, "b": 3}),
+            ToolCall(id="call_mul", name="multiply_numbers", input={"a": 4, "b": 5}),
+        ],
+        usage=Usage(input_tokens=20, output_tokens=10),
+    )
+    # Second call: model returns final text using both results
+    second_response = ProviderResponse(
+        text="2+3=5 and 4*5=20",
+        tool_calls=[],
+        usage=Usage(input_tokens=40, output_tokens=15),
+    )
+    mock_provider.chat.side_effect = [first_response, second_response]
+    mock_get_provider.return_value = mock_provider
+
+    agent = Agent(provider="anthropic", tools=[add_numbers, multiply_numbers])
+    result = agent.run("Add 2+3 and multiply 4*5")
+
+    assert result == "2+3=5 and 4*5=20"
+    assert mock_provider.chat.call_count == 2
+
+    # Verify tool results were sent back in the correct order (add first, then multiply)
+    second_call_args = mock_provider.chat.call_args_list[1]
+    messages = second_call_args.kwargs["messages"]
+    # The last message should be the user message with tool results
+    tool_results_msg = messages[-1]
+    assert tool_results_msg["role"] == "user"
+    tool_results = tool_results_msg["content"]
+    assert len(tool_results) == 2
+    assert tool_results[0]["tool_use_id"] == "call_add"
+    assert tool_results[0]["content"] == "5"
+    assert tool_results[1]["tool_use_id"] == "call_mul"
+    assert tool_results[1]["content"] == "20"

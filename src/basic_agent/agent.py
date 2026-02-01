@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import jinja2
 from pydantic import BaseModel
@@ -166,10 +167,8 @@ class Agent:
                 assistant_content = self._build_assistant_content(response)
                 messages.append({"role": "assistant", "content": assistant_content})
 
-                tool_results_content: List[Dict[str, Any]] = []
-
+                # Check for structured output tool first
                 for tc in response.tool_calls:
-                    # Check if this is the structured output tool
                     if self._output_model and tc.name == self._output_model.__name__:
                         record_usage(span, total_input_tokens, total_output_tokens)
                         parsed = parse_structured_output(self._output_model, tc.input)
@@ -178,22 +177,10 @@ class Agent:
                             self._update_memory(messages, memory_id, current_memory, str(tc.input))
                         return parsed
 
-                    # Execute registered tool
-                    tool_def = self._registry.get(tc.name)
-                    if tool_def is None:
-                        result_str = f"Error: Unknown tool '{tc.name}'"
-                    else:
-                        record_tool_call(span, tc.name, json.dumps(tc.input))
-                        try:
-                            result = tool_def.execute(**tc.input)
-                            result_str = str(result)
-                        except Exception as e:
-                            result_str = f"Error executing tool '{tc.name}': {e}"
-                        record_tool_result(span, tc.name, result_str)
-
-                    tool_results_content.append(
-                        self._build_tool_result(tc.id, tc.name, result_str)
-                    )
+                # Execute all tool calls in parallel
+                tool_results_content = self._execute_tool_calls_parallel(
+                    response.tool_calls, span
+                )
 
                 # Add tool results to messages
                 messages.append({"role": "user", "content": tool_results_content})
@@ -339,3 +326,56 @@ class Agent:
                 "tool_call_id": tool_call_id,
                 "content": result,
             }
+
+    def _execute_single_tool(self, tc: Any) -> Tuple[Any, str]:
+        """Execute a single tool call and return (tool_call, result_str).
+
+        Handles tool lookup, execution, and error handling. Thread-safe.
+        """
+        tool_def = self._registry.get(tc.name)
+        if tool_def is None:
+            return (tc, f"Error: Unknown tool '{tc.name}'")
+        try:
+            result = tool_def.execute(**tc.input)
+            return (tc, str(result))
+        except Exception as e:
+            return (tc, f"Error executing tool '{tc.name}': {e}")
+
+    def _execute_tool_calls_parallel(
+        self, tool_calls: list, span: Any
+    ) -> List[Dict[str, Any]]:
+        """Execute tool calls in parallel using a thread pool.
+
+        Results are returned in the original tool call order.
+        """
+        if not tool_calls:
+            return []
+
+        max_workers = min(len(tool_calls), 10)
+        # Map from tool call id to (index, tool_call, result_str)
+        results_by_id: Dict[str, Tuple[int, Any, str]] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {
+                executor.submit(self._execute_single_tool, tc): i
+                for i, tc in enumerate(tool_calls)
+            }
+
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                tc, result_str = future.result()
+                results_by_id[tc.id] = (idx, tc, result_str)
+
+        # Build results in original order and record tracing events
+        tool_results_content: List[Dict[str, Any]] = []
+        for tc in tool_calls:
+            _, _, result_str = results_by_id[tc.id]
+            tool_def = self._registry.get(tc.name)
+            if tool_def is not None:
+                record_tool_call(span, tc.name, json.dumps(tc.input))
+                record_tool_result(span, tc.name, result_str)
+            tool_results_content.append(
+                self._build_tool_result(tc.id, tc.name, result_str)
+            )
+
+        return tool_results_content
