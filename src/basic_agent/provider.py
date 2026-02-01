@@ -245,7 +245,7 @@ def get_provider(provider: str = "anthropic", model: Optional[str] = None) -> Pr
         model: Model name override. Defaults to provider-specific default.
     """
     if provider == "anthropic":
-        return AnthropicProvider(model=model or "claude-sonnet-4-5-20250929")
+        return AnthropicProvider(model=model or "claude-haiku-4-5-20251001")
     elif provider == "openai":
         return OpenAIProvider(model=model or "gpt-5.2")
     else:
