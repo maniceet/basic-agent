@@ -1,5 +1,7 @@
 # basic-agent
 
+[![codecov](https://codecov.io/gh/maniceet/basic-agent/graph/badge.svg)](https://codecov.io/gh/maniceet/basic-agent)
+
 A reusable Python library for building LLM-powered agents. Connect to Anthropic or OpenAI with a single interface, register Python functions as tools, return structured outputs validated with Pydantic, persist conversational memory in PostgreSQL, and trace every LLM call with OpenTelemetry.
 
 ```
@@ -22,7 +24,6 @@ Requires Python >= 3.9. Dependencies managed with [uv](https://docs.astral.sh/uv
 - [Agent API Reference](#agent-api-reference)
 - [Project Structure](#project-structure)
 - [Development](#development)
-- [Test Coverage](#test-coverage)
 
 ---
 
@@ -404,43 +405,3 @@ uv run pytest
 ```bash
 uv run pytest --cov=basic_agent --cov-report=term-missing
 ```
-
----
-
-## Test Coverage
-
-58 tests across 6 test modules. Overall coverage: **96%** (459 statements, 17 missed). All external dependencies (Anthropic SDK, OpenAI SDK, PostgreSQL) are mocked — no live services required to run tests.
-
-```
-Name                          Stmts   Miss  Cover   Missing
------------------------------------------------------------
-src/basic_agent/__init__.py       5      0   100%
-src/basic_agent/agent.py        156      9    94%   74, 177, 190, 196, 312, 324, 341-342, 352
-src/basic_agent/memory.py        62      0   100%
-src/basic_agent/models.py        10      0   100%
-src/basic_agent/provider.py     119      4    97%   101, 113, 151, 212
-src/basic_agent/tools.py         59      2    97%   25, 38
-src/basic_agent/tracing.py       48      2    96%   40, 49
------------------------------------------------------------
-TOTAL                           459     17    96%
-```
-
-### Breakdown by module
-
-| Module | Tests | What is covered |
-|---|---|---|
-| `test_agent.py` | 15 | Text responses, tool-use loop, structured output, unknown tool handling, max iteration safety, Jinja2 template rendering, memory loading/updating, parallel tool execution |
-| `test_provider.py` | 14 | Tool schema translation (Anthropic/OpenAI formats), tool choice translation, provider factory, `chat()` for text and tool call responses on both providers |
-| `test_memory.py` | 9 | CRUD operations (put/get/list/delete), Pydantic validation on write, `memory_prompt` storage, connection lifecycle |
-| `test_tracing.py` | 8 | Tracer setup, span creation with attributes, optional attributes (temperature, max_tokens), user/assistant message events, tool call/result events, token usage recording |
-| `test_models.py` | 7 | Pydantic-to-tool-schema conversion, description extraction, validation round-trips, invalid/missing field rejection |
-| `test_tools.py` | 5 | `@tool` decorator behavior, type-hint-to-JSON-schema conversion, required vs optional params, registry operations |
-
-### Uncovered lines
-
-The 17 uncovered lines are primarily:
-
-- **OpenAI-specific branches** in `agent.py` (message formatting for OpenAI provider)
-- **Memory update triggers** at structured output return and max-iteration exit paths in `agent.py`
-- **Fallback paths** in tool schema generation and provider translation for edge-case type mappings
-- **Conditional attribute setting** in tracing span creation
