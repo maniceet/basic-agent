@@ -8,8 +8,6 @@ from basic_agent.provider import (
     AnthropicProvider,
     OpenAIProvider,
     ProviderResponse,
-    ToolCall,
-    Usage,
     _to_anthropic_tool_choice,
     _to_anthropic_tools,
     _to_openai_tool_choice,
@@ -75,14 +73,14 @@ def test_get_provider_unknown():
 def test_get_provider_anthropic(mock_anthropic):
     provider = get_provider("anthropic")
     assert provider.provider_name == "anthropic"
-    assert provider.model_name == "claude-sonnet-4-20250514"
+    assert provider.model_name == "claude-haiku-4-5-20251001"
 
 
 @patch("basic_agent.provider.openai")
 def test_get_provider_openai(mock_openai):
     provider = get_provider("openai")
     assert provider.provider_name == "openai"
-    assert provider.model_name == "gpt-4o"
+    assert provider.model_name == "gpt-5.2"
 
 
 # --- AnthropicProvider.chat ---
@@ -103,7 +101,7 @@ def test_anthropic_chat_text_response(mock_anthropic_module):
     mock_response.usage.output_tokens = 5
     mock_client.messages.create.return_value = mock_response
 
-    provider = AnthropicProvider(model="claude-sonnet-4-20250514")
+    provider = AnthropicProvider(model="claude-haiku-4-5-20251001")
     result = provider.chat(messages=[{"role": "user", "content": "Hi"}], system="Be nice")
 
     assert isinstance(result, ProviderResponse)
