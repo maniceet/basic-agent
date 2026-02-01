@@ -11,9 +11,8 @@ from pydantic import BaseModel
 from .memory import Memory
 from .models import parse_structured_output, structured_output
 from .provider import Provider, ProviderResponse, get_provider
-from .tools import ToolDefinition, ToolRegistry
+from .tools import ToolRegistry
 from .tracing import (
-    get_tracer,
     llm_span,
     record_assistant_message,
     record_tool_call,
