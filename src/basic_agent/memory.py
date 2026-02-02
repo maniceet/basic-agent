@@ -1,76 +1,52 @@
-"""Persistent memory layer backed by PostgreSQL + JSONB."""
+"""Persistent memory layer backed by Redis."""
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, List, Optional, Type, TypeVar
+from typing import List, Optional, Type, TypeVar
 
-import psycopg
+import redis
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
 
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS memory (
-    id          TEXT PRIMARY KEY,
-    agent_id    TEXT NOT NULL,
-    schema_name TEXT NOT NULL,
-    data        JSONB NOT NULL,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now()
-);
-"""
-
-_CREATE_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_memory_agent ON memory(agent_id);
-"""
-
 
 class Memory:
-    """Persistent memory storage using PostgreSQL JSONB.
+    """Persistent memory storage using Redis.
 
     Stores and retrieves structured memory items validated against a
     Pydantic model schema.
 
+    Redis key format: ``{namespace}:{schema_name}:{id}``
+
     Args:
-        dsn: PostgreSQL connection string. Falls back to DATABASE_URL env var.
-        agent_id: Scopes memory items per agent instance.
+        namespace: Key prefix for scoping memory items.
         schema: A Pydantic BaseModel class defining the shape of memory items.
-        memory_prompt: Optional prompt used by the Agent to guide memory updates.
+        url: Redis connection URL. Falls back to ``REDIS_URL`` env var.
     """
 
     def __init__(
         self,
-        agent_id: str,
+        namespace: str,
         schema: Type[T],
-        dsn: Optional[str] = None,
-        memory_prompt: Optional[str] = None,
+        url: Optional[str] = None,
     ) -> None:
-        self._dsn = dsn or os.environ.get("DATABASE_URL", "")
-        self._agent_id = agent_id
+        self._url = url or os.environ.get("REDIS_URL", "redis://localhost:6379")
+        self._namespace = namespace
         self._schema: Type[T] = schema
         self._schema_name = schema.__name__
-        self._conn: Any = None
-        self._initialized = False
-        self.memory_prompt = memory_prompt
+        self._client: Optional[redis.Redis] = None
 
-    def _get_conn(self) -> Any:
-        """Lazily establish a database connection."""
-        if self._conn is None:
-            self._conn = psycopg.connect(self._dsn)
-        if not self._initialized:
-            self._ensure_table()
-            self._initialized = True
-        return self._conn
+    def _get_client(self) -> redis.Redis:
+        """Lazily establish a Redis connection."""
+        if self._client is None:
+            self._client = redis.Redis.from_url(self._url, decode_responses=True)
+        return self._client
 
-    def _ensure_table(self) -> None:
-        """Create the memory table if it doesn't exist."""
-        conn = self._conn
-        with conn.cursor() as cur:
-            cur.execute(_CREATE_TABLE_SQL)
-            cur.execute(_CREATE_INDEX_SQL)
-        conn.commit()
+    def _key(self, id: str) -> str:
+        """Build the full Redis key for an item."""
+        return f"{self._namespace}:{self._schema_name}:{id}"
 
     def put(self, id: str, data: T) -> None:
         """Store a memory item, validating through the Pydantic model.
@@ -79,66 +55,45 @@ class Memory:
             id: Unique identifier for this memory item.
             data: A Pydantic model instance matching the schema.
         """
-        # Validate the data matches the schema
         validated = self._schema.model_validate(data.model_dump())
-        json_data = validated.model_dump(mode="json")
-
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO memory (id, agent_id, schema_name, data, updated_at)
-                VALUES (%s, %s, %s, %s::jsonb, now())
-                ON CONFLICT (id) DO UPDATE SET
-                    data = EXCLUDED.data,
-                    updated_at = now()
-                """,
-                (id, self._agent_id, self._schema_name, json.dumps(json_data)),
-            )
-        conn.commit()
+        json_str = json.dumps(validated.model_dump(mode="json"))
+        client = self._get_client()
+        client.set(self._key(id), json_str)
 
     def get(self, id: str) -> Optional[T]:
         """Retrieve a memory item by ID.
 
         Returns a validated Pydantic instance or None if not found.
         """
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT data FROM memory WHERE id = %s AND agent_id = %s AND schema_name = %s",
-                (id, self._agent_id, self._schema_name),
-            )
-            row = cur.fetchone()
-
-        if row is None:
+        client = self._get_client()
+        raw = client.get(self._key(id))
+        if raw is None:
             return None
-        return self._schema.model_validate(row[0])
+        return self._schema.model_validate(json.loads(raw))
 
     def list(self) -> List[T]:
-        """List all memory items for this agent and schema."""
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT data FROM memory WHERE agent_id = %s AND schema_name = %s ORDER BY created_at",
-                (self._agent_id, self._schema_name),
-            )
-            rows = cur.fetchall()
-
-        return [self._schema.model_validate(row[0]) for row in rows]
+        """List all memory items for this namespace and schema."""
+        client = self._get_client()
+        pattern = f"{self._namespace}:{self._schema_name}:*"
+        keys: List[str] = []
+        for key in client.scan_iter(match=pattern):
+            keys.append(key)
+        if not keys:
+            return []
+        values = client.mget(keys)
+        items: List[T] = []
+        for v in values:
+            if v is not None:
+                items.append(self._schema.model_validate(json.loads(v)))
+        return items
 
     def delete(self, id: str) -> None:
         """Delete a memory item by ID."""
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM memory WHERE id = %s AND agent_id = %s AND schema_name = %s",
-                (id, self._agent_id, self._schema_name),
-            )
-        conn.commit()
+        client = self._get_client()
+        client.delete(self._key(id))
 
     def close(self) -> None:
-        """Close the database connection."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
-            self._initialized = False
+        """Close the Redis connection."""
+        if self._client is not None:
+            self._client.close()
+            self._client = None
