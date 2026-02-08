@@ -24,11 +24,11 @@ result = agent.run(
     "What can you help me with?",
     deps=MyDeps(role="support agent", company="Acme Corp"),
 )
-print(f"Acme agent: {result}")
+print(f"Acme agent: {result.output}")
 
 # Reuse the same agent with different deps
 result = agent.run(
     "What can you help me with?",
     deps=MyDeps(role="sales representative", company="Globex Inc"),
 )
-print(f"Globex agent: {result}")
+print(f"Globex agent: {result.output}")

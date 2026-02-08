@@ -37,8 +37,10 @@ agent = Agent(
     system="You are a friendly assistant. Keep responses concise.",
 )
 
-response = agent.run("What is the capital of France?")
-print(response)
+result = agent.run("What is the capital of France?")
+print(result.output)         # "The capital of France is Paris."
+print(result.usage)          # Usage(input_tokens=..., output_tokens=...)
+print(result.provider_calls) # 1
 ```
 
 Set your API key in the environment or a `.env` file:
@@ -101,8 +103,8 @@ agent = Agent(
     tools=[get_weather],
 )
 
-response = agent.run("What's the weather like in London?")
-print(response)
+result = agent.run("What's the weather like in London?")
+print(result.output)
 ```
 
 The decorator extracts:
@@ -139,13 +141,14 @@ agent = Agent(
     output_type=MovieReview,
 )
 
-review = agent.run("Review the movie 'Inception' (2010)")
+result = agent.run("Review the movie 'Inception' (2010)")
+review = result.output  # validated MovieReview instance
 print(f"Title: {review.title}")
 print(f"Rating: {review.rating}/10")
 print(f"Pros: {review.pros}")
 ```
 
-The return value is a fully validated Pydantic instance, not a dict or raw JSON.
+The `result.output` is a fully validated Pydantic instance, not a dict or raw JSON.
 
 ---
 
@@ -250,11 +253,7 @@ result = agent.run(
 )
 ```
 
-Returns a `str` (plain text) or a validated Pydantic model instance if `output_type` is set.
-
-### `agent.last_run`
-
-After calling `run()`, `agent.last_run` is a `RunResult` dataclass:
+Returns a `RunResult` dataclass:
 
 ```python
 @dataclass
@@ -264,13 +263,20 @@ class RunResult:
     provider_calls: int   # number of chat() API calls made
 ```
 
+```python
+result = agent.run("Hello")
+print(result.output)          # "Hi there!"
+print(result.usage)           # Usage(input_tokens=10, output_tokens=5)
+print(result.provider_calls)  # 1
+```
+
 ### Execution flow
 
 1. Render system prompt (Jinja2 templates with `deps` if provided)
 2. Call provider with message and tool definitions
 3. If tool calls returned: execute tools in parallel, append results, loop back to step 2
 4. If `output_type` is set: validate response through the Pydantic model
-5. Return result and populate `last_run`
+5. Return `RunResult` with output, accumulated usage, and call count
 
 ---
 

@@ -24,10 +24,10 @@ agent = Agent(
     output_type=MovieReview,
 )
 
-review = agent.run("Review the movie 'Inception' (2010)")
-# review is a validated MovieReview instance
-print(review.title)   # "Inception"
-print(review.rating)  # 8.5
+result = agent.run("Review the movie 'Inception' (2010)")
+# result.output is a validated MovieReview instance
+print(result.output.title)   # "Inception"
+print(result.output.rating)  # 8.5
 ```
 
 ## How It Works

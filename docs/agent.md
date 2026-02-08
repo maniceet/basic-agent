@@ -21,7 +21,7 @@ Agent(
 
 ## `agent.run(message, *, deps=None)`
 
-Runs the agent with a user message. Returns either a plain `str` or a validated Pydantic model instance (when `output_type` is set).
+Runs the agent with a user message. Returns a `RunResult` containing the output, token usage, and provider call count.
 
 ### How the loop works
 
@@ -54,9 +54,9 @@ result = agent.run("Hello", deps=MyDeps(role="support agent", company="Acme"))
 
 Uses `jinja2.StrictUndefined` -- missing variables raise errors.
 
-## `agent.last_run`
+## `RunResult`
 
-After calling `run()`, `agent.last_run` is a `RunResult` dataclass:
+`run()` returns a `RunResult` dataclass:
 
 ```python
 @dataclass
@@ -64,6 +64,13 @@ class RunResult:
     output: Any           # str or Pydantic model instance
     usage: Usage          # total tokens (input_tokens, output_tokens)
     provider_calls: int   # number of chat() API calls made
+```
+
+```python
+result = agent.run("Hello")
+print(result.output)          # "Hi there!"
+print(result.usage)           # Usage(input_tokens=10, output_tokens=5)
+print(result.provider_calls)  # 1
 ```
 
 ## Provider-specific message formatting

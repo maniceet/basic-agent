@@ -8,5 +8,7 @@ agent = Agent(
     system="You are a friendly assistant. Keep responses concise.",
 )
 
-response = agent.run("What is the capital of France?")
-print(response)
+result = agent.run("What is the capital of France?")
+print(result.output)
+print(f"Usage: {result.usage}")
+print(f"Provider calls: {result.provider_calls}")

@@ -17,7 +17,7 @@ Exported from `basic_agent`:
 | Symbol      | Type  | Purpose |
 |-------------|-------|---------|
 | `Agent`     | class | Core agent -- orchestrates LLM conversations, tools, structured output |
-| `RunResult` | dataclass | Stats from the most recent `agent.run()` call (output, usage, provider_calls) |
+| `RunResult` | dataclass | Return type of `agent.run()` (output, usage, provider_calls) |
 | `Memory`    | class | Redis-backed persistent memory with Pydantic validation |
 | `tool`      | decorator | Marks a function as an agent tool |
 
@@ -38,8 +38,10 @@ agent = Agent(
     tools=[get_weather],
 )
 
-response = agent.run("What's the weather like in London?")
-print(response)
+result = agent.run("What's the weather like in London?")
+print(result.output)         # text or Pydantic model
+print(result.usage)          # Usage(input_tokens=..., output_tokens=...)
+print(result.provider_calls) # number of LLM API calls
 ```
 
 ## Project Structure

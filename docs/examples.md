@@ -8,7 +8,8 @@ Minimal agent with no tools. Sends a message, prints the response.
 
 ```python
 agent = Agent(provider="anthropic", model="claude-sonnet-4-20250514", system="...")
-response = agent.run("What is the capital of France?")
+result = agent.run("What is the capital of France?")
+print(result.output)  # "The capital of France is Paris."
 ```
 
 ## tool_use.py
@@ -22,7 +23,7 @@ def get_weather(city: str) -> str:
     return weather_data.get(city.lower(), "...")
 
 agent = Agent(tools=[get_weather])
-response = agent.run("What's the weather like in London?")
+result = agent.run("What's the weather like in London?")
 ```
 
 ## structured_output.py
@@ -39,7 +40,7 @@ class MovieReview(BaseModel):
     cons: list
 
 agent = Agent(output_type=MovieReview)
-review = agent.run("Review 'Inception'")  # returns MovieReview instance
+result = agent.run("Review 'Inception'")  # result.output is a MovieReview instance
 ```
 
 ## jinja_template.py
@@ -49,6 +50,7 @@ System prompt with Jinja2 `{{deps.field}}` placeholders, injected at runtime via
 ```python
 agent = Agent(system="You are a {{deps.role}} for {{deps.company}}.")
 result = agent.run("Hello", deps=MyDeps(role="support agent", company="Acme"))
+print(result.output)
 ```
 
 The same agent can be reused with different deps for each call.

@@ -23,10 +23,13 @@ agent = Agent(
     output_type=MovieReview,
 )
 
-review = agent.run("Review the movie 'Inception' (2010)")
+result = agent.run("Review the movie 'Inception' (2010)")
+review = result.output
 print(f"Title: {review.title}")
 print(f"Year: {review.year}")
 print(f"Rating: {review.rating}/10")
 print(f"Summary: {review.summary}")
 print(f"Pros: {review.pros}")
 print(f"Cons: {review.cons}")
+print(f"Usage: {result.usage}")
+print(f"Provider calls: {result.provider_calls}")

@@ -49,7 +49,7 @@ def test_agent_simple_text_response(mock_get_provider):
     agent = Agent(provider="anthropic", system="Be helpful")
     result = agent.run("Hi")
 
-    assert result == "Hello!"
+    assert result.output == "Hello!"
     mock_provider.chat.assert_called_once()
 
 
@@ -77,7 +77,7 @@ def test_agent_tool_use_loop(mock_get_provider):
     agent = Agent(provider="anthropic", tools=[add_numbers])
     result = agent.run("What is 2 + 3?")
 
-    assert result == "The sum is 5."
+    assert result.output == "The sum is 5."
     assert mock_provider.chat.call_count == 2
 
 
@@ -104,9 +104,10 @@ def test_agent_structured_output(mock_get_provider):
     agent = Agent(provider="anthropic", output_type=SentimentResult)
     result = agent.run("I love this product!")
 
-    assert isinstance(result, SentimentResult)
-    assert result.sentiment == "positive"
-    assert result.confidence == 0.95
+    assert isinstance(result, RunResult)
+    assert isinstance(result.output, SentimentResult)
+    assert result.output.sentiment == "positive"
+    assert result.output.confidence == 0.95
 
 
 @patch("basic_agent.agent.get_provider")
@@ -133,7 +134,7 @@ def test_agent_unknown_tool(mock_get_provider):
     agent = Agent(provider="anthropic")
     result = agent.run("Do something")
 
-    assert "couldn't find" in result.lower()
+    assert "couldn't find" in result.output.lower()
 
 
 @patch("basic_agent.agent.get_provider")
@@ -171,7 +172,7 @@ def test_agent_empty_response(mock_get_provider):
     agent = Agent(provider="anthropic")
     result = agent.run("Hi")
 
-    assert result == ""
+    assert result.output == ""
 
 
 # ---- Jinja2 deps rendering tests ----
@@ -199,7 +200,7 @@ def test_jinja2_deps_rendering(mock_get_provider):
         deps=MyDeps(role="support agent", company="Acme Corp"),
     )
 
-    assert result == "Hello!"
+    assert result.output == "Hello!"
     # Check the system prompt passed to provider.chat
     call_kwargs = mock_provider.chat.call_args
     assert call_kwargs.kwargs["system"] == "You are a support agent for Acme Corp."
@@ -241,7 +242,7 @@ def test_run_no_kwargs_backward_compatible(mock_get_provider):
     agent = Agent(provider="anthropic")
     result = agent.run("Hi")
 
-    assert result == "All good!"
+    assert result.output == "All good!"
 
 
 # ---- Parallel tool execution tests ----
@@ -275,7 +276,7 @@ def test_agent_parallel_tool_execution(mock_get_provider):
     agent = Agent(provider="anthropic", tools=[add_numbers, multiply_numbers])
     result = agent.run("Add 2+3 and multiply 4*5")
 
-    assert result == "2+3=5 and 4*5=20"
+    assert result.output == "2+3=5 and 4*5=20"
     assert mock_provider.chat.call_count == 2
 
     # Verify tool results were sent back in the correct order (add first, then multiply)
@@ -292,12 +293,12 @@ def test_agent_parallel_tool_execution(mock_get_provider):
     assert tool_results[1]["content"] == "20"
 
 
-# ---- RunResult / last_run tracking tests ----
+# ---- RunResult tests ----
 
 
 @patch("basic_agent.agent.get_provider")
-def test_last_run_populated_simple(mock_get_provider):
-    """Verify last_run is populated after a simple (no tool) run."""
+def test_run_returns_run_result(mock_get_provider):
+    """Verify run() returns a RunResult with output, usage, and provider_calls."""
     mock_provider = MagicMock()
     mock_provider.provider_name = "anthropic"
     mock_provider.model_name = "claude-sonnet-4-20250514"
@@ -311,18 +312,16 @@ def test_last_run_populated_simple(mock_get_provider):
     agent = Agent(provider="anthropic")
     result = agent.run("Hi")
 
-    assert result == "Hello!"
-    assert agent.last_run is not None
-    assert isinstance(agent.last_run, RunResult)
-    assert agent.last_run.output == "Hello!"
-    assert agent.last_run.usage.input_tokens == 10
-    assert agent.last_run.usage.output_tokens == 5
-    assert agent.last_run.provider_calls == 1
+    assert isinstance(result, RunResult)
+    assert result.output == "Hello!"
+    assert result.usage.input_tokens == 10
+    assert result.usage.output_tokens == 5
+    assert result.provider_calls == 1
 
 
 @patch("basic_agent.agent.get_provider")
-def test_last_run_populated_tool_use(mock_get_provider):
-    """Verify last_run accumulates tokens across tool-use loop iterations."""
+def test_run_result_accumulates_usage(mock_get_provider):
+    """Verify RunResult accumulates tokens across tool-use loop iterations."""
     mock_provider = MagicMock()
     mock_provider.provider_name = "anthropic"
     mock_provider.model_name = "claude-sonnet-4-20250514"
@@ -343,8 +342,7 @@ def test_last_run_populated_tool_use(mock_get_provider):
     agent = Agent(provider="anthropic", tools=[add_numbers])
     result = agent.run("What is 2 + 3?")
 
-    assert result == "The sum is 5."
-    assert agent.last_run is not None
-    assert agent.last_run.usage.input_tokens == 50  # 20 + 30
-    assert agent.last_run.usage.output_tokens == 25  # 10 + 15
-    assert agent.last_run.provider_calls == 2
+    assert result.output == "The sum is 5."
+    assert result.usage.input_tokens == 50  # 20 + 30
+    assert result.usage.output_tokens == 25  # 10 + 15
+    assert result.provider_calls == 2

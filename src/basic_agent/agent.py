@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 
 import jinja2
 from pydantic import BaseModel
@@ -16,9 +14,7 @@ from .tools import ToolRegistry
 
 T = TypeVar("T", bound=BaseModel)
 
-
-@dataclass
-class RunResult:
+class RunResult(BaseModel):
     """Stats from the most recent agent.run() call."""
 
     output: Any  # str or Pydantic model instance
@@ -57,7 +53,6 @@ class Agent:
         self._temperature = temperature
         self._max_iterations = max_iterations
         self._output_type = output_type
-        self.last_run: RunResult | None = None
 
         # Build tool registry from decorated functions
         self._registry = ToolRegistry()
@@ -80,7 +75,7 @@ class Agent:
         message: str,
         *,
         deps: Optional[BaseModel] = None,
-    ) -> Union[str, T, Any]:
+    ) -> RunResult:
         """Run the agent with a user message.
 
         Args:
@@ -89,8 +84,7 @@ class Agent:
                 system prompt Jinja2 template as ``{{deps.field}}``.
 
         Returns:
-            - If output_type is set: a validated Pydantic model instance.
-            - Otherwise: the plain text response string.
+            A RunResult containing the output, token usage, and provider call count.
         """
         # --- Build system prompt ---
         rendered_system = self._render_system_prompt(deps)
@@ -98,10 +92,17 @@ class Agent:
         # Build tool schemas
         tool_schemas = self._registry.schemas()
         tool_choice: Optional[Any] = None
+        has_regular_tools = len(tool_schemas) > 0
 
         if self._output_tool_schema is not None:
             tool_schemas.append(self._output_tool_schema)
-            tool_choice = self._output_model.__name__
+            if has_regular_tools:
+                # Let the LLM use regular tools first; it can call the
+                # output tool voluntarily when it has enough information.
+                tool_choice = "auto"
+            else:
+                # No regular tools — force the structured output tool.
+                tool_choice = self._output_model.__name__
 
         messages: List[Dict[str, Any]] = [
             {"role": "user", "content": message},
@@ -125,15 +126,20 @@ class Agent:
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
 
-            # No tool calls — we're done
+            # No tool calls — we're done (unless we still need structured output)
             if not response.tool_calls:
-                main_result = response.text or ""
-                self.last_run = RunResult(
-                    output=main_result,
+                if self._output_model is not None:
+                    # LLM returned text but we need structured output.
+                    # Append the text as an assistant message and force the
+                    # output tool on the next iteration.
+                    messages.append({"role": "assistant", "content": response.text or ""})
+                    tool_choice = self._output_model.__name__
+                    continue
+                return RunResult(
+                    output=response.text or "",
                     usage=Usage(total_input_tokens, total_output_tokens),
                     provider_calls=provider_calls,
                 )
-                return main_result
 
             # Process tool calls
             # Build assistant message with tool use
@@ -143,13 +149,11 @@ class Agent:
             # Check for structured output tool first
             for tc in response.tool_calls:
                 if self._output_model and tc.name == self._output_model.__name__:
-                    parsed = parse_structured_output(self._output_model, tc.input)
-                    self.last_run = RunResult(
-                        output=parsed,
+                    return RunResult(
+                        output=parse_structured_output(self._output_model, tc.input),
                         usage=Usage(total_input_tokens, total_output_tokens),
                         provider_calls=provider_calls,
                     )
-                    return parsed
 
             # Execute all tool calls in parallel
             tool_results_content = self._execute_tool_calls_parallel(
@@ -164,13 +168,11 @@ class Agent:
                 tool_choice = "auto"
 
         # Max iterations reached
-        main_result = response.text or ""
-        self.last_run = RunResult(
-            output=main_result,
+        return RunResult(
+            output=response.text or "",
             usage=Usage(total_input_tokens, total_output_tokens),
             provider_calls=provider_calls,
         )
-        return main_result
 
     def _render_system_prompt(
         self,
