@@ -1,12 +1,9 @@
 """Tests for the core Agent class — mocks the provider."""
 
 from unittest.mock import MagicMock, patch
-
-import pytest
 from pydantic import BaseModel
 
-from basic_agent.agent import Agent
-from basic_agent.memory import Memory
+from basic_agent.agent import Agent, RunResult
 from basic_agent.provider import ProviderResponse, ToolCall, Usage
 from basic_agent.tools import tool
 
@@ -16,14 +13,6 @@ class SentimentResult(BaseModel):
 
     sentiment: str
     confidence: float
-
-
-class UserContext(BaseModel):
-    """Schema for memory tests."""
-
-    name: str = ""
-    language: str = "en"
-    preferences: str = ""
 
 
 class MyDeps(BaseModel):
@@ -255,193 +244,6 @@ def test_run_no_kwargs_backward_compatible(mock_get_provider):
     assert result == "All good!"
 
 
-# ---- Memory ID / system prompt tests ----
-
-
-@patch("basic_agent.agent.get_provider")
-@patch("basic_agent.memory.psycopg")
-def test_memory_id_loads_into_system_prompt(mock_psycopg, mock_get_provider):
-    """Verify that memory data is prepended to the system prompt."""
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = (
-        {"name": "Alice", "language": "en", "preferences": "concise"},
-    )
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-    mock_provider = MagicMock()
-    mock_provider.provider_name = "anthropic"
-    mock_provider.model_name = "claude-sonnet-4-20250514"
-    mock_provider.chat.return_value = ProviderResponse(
-        text="Hi Alice!",
-        tool_calls=[],
-        usage=Usage(input_tokens=10, output_tokens=5),
-    )
-    mock_get_provider.return_value = mock_provider
-
-    memory = Memory(
-        agent_id="test-bot",
-        schema=UserContext,
-        dsn="postgresql://test",
-    )
-    agent = Agent(provider="anthropic", system="Be helpful.", memory=memory)
-    result = agent.run("Hi", memory_id="user-123", memory_update=False)
-
-    assert result == "Hi Alice!"
-    # Check that system prompt contains both memory and original prompt
-    call_kwargs = mock_provider.chat.call_args
-    system = call_kwargs.kwargs["system"]
-    assert "<memory>" in system
-    assert '"name": "Alice"' in system
-    assert "Be helpful." in system
-
-
-@patch("basic_agent.agent.get_provider")
-@patch("basic_agent.memory.psycopg")
-def test_memory_id_not_found_runs_without_memory(mock_psycopg, mock_get_provider):
-    """Verify graceful handling when memory_id has no stored data."""
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = None  # No memory found
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-    mock_provider = MagicMock()
-    mock_provider.provider_name = "anthropic"
-    mock_provider.model_name = "claude-sonnet-4-20250514"
-    mock_provider.chat.return_value = ProviderResponse(
-        text="Hello stranger!",
-        tool_calls=[],
-        usage=Usage(input_tokens=10, output_tokens=5),
-    )
-    mock_get_provider.return_value = mock_provider
-
-    memory = Memory(agent_id="test-bot", schema=UserContext, dsn="postgresql://test")
-    agent = Agent(provider="anthropic", system="Be helpful.", memory=memory)
-    result = agent.run("Hi", memory_id="new-user", memory_update=False)
-
-    assert result == "Hello stranger!"
-    # System prompt should NOT contain <memory> section
-    call_kwargs = mock_provider.chat.call_args
-    system = call_kwargs.kwargs["system"]
-    assert "<memory>" not in system
-    assert system == "Be helpful."
-
-
-@patch("basic_agent.agent.get_provider")
-def test_memory_id_without_memory_raises(mock_get_provider):
-    """Verify that passing memory_id without a Memory instance raises ValueError."""
-    mock_provider = MagicMock()
-    mock_provider.provider_name = "anthropic"
-    mock_provider.model_name = "claude-sonnet-4-20250514"
-    mock_get_provider.return_value = mock_provider
-
-    agent = Agent(provider="anthropic")  # No memory configured
-    with pytest.raises(ValueError, match="memory_id was provided but no Memory instance"):
-        agent.run("Hi", memory_id="user-123")
-
-
-# ---- Memory update tests ----
-
-
-@patch("basic_agent.agent.get_provider")
-@patch("basic_agent.memory.psycopg")
-def test_memory_update_second_llm_call(mock_psycopg, mock_get_provider):
-    """Verify that a second LLM call is made to update memory, and memory.put is called."""
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    # First call: memory.get returns existing data
-    mock_cursor.fetchone.return_value = (
-        {"name": "Alice", "language": "en", "preferences": ""},
-    )
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-    mock_provider = MagicMock()
-    mock_provider.provider_name = "anthropic"
-    mock_provider.model_name = "claude-sonnet-4-20250514"
-
-    # First call: main conversation response
-    main_response = ProviderResponse(
-        text="Got it, I'll keep things concise for you Alice!",
-        tool_calls=[],
-        usage=Usage(input_tokens=10, output_tokens=15),
-    )
-    # Second call: memory update structured output
-    memory_update_response = ProviderResponse(
-        text=None,
-        tool_calls=[
-            ToolCall(
-                id="mem_call_1",
-                name="UserContext",
-                input={"name": "Alice", "language": "en", "preferences": "concise answers"},
-            )
-        ],
-        usage=Usage(input_tokens=20, output_tokens=10),
-    )
-    mock_provider.chat.side_effect = [main_response, memory_update_response]
-    mock_get_provider.return_value = mock_provider
-
-    memory = Memory(
-        agent_id="test-bot",
-        schema=UserContext,
-        dsn="postgresql://test",
-        memory_prompt="Update user preferences based on conversation.",
-    )
-    agent = Agent(provider="anthropic", system="Be helpful.", memory=memory)
-    result = agent.run("I prefer concise answers.", memory_id="user-123", memory_update=True)
-
-    assert result == "Got it, I'll keep things concise for you Alice!"
-    # Two provider.chat calls: main loop + memory update
-    assert mock_provider.chat.call_count == 2
-    # Verify the memory update call used structured output (tool_choice = schema name)
-    second_call_kwargs = mock_provider.chat.call_args_list[1]
-    assert second_call_kwargs.kwargs["tool_choice"] == "UserContext"
-    # Verify memory.put was called (via the DB cursor execute)
-    # The put call triggers an INSERT/UPDATE SQL
-    put_calls = [
-        c for c in mock_cursor.execute.call_args_list
-        if c.args and isinstance(c.args[0], str) and "INSERT INTO memory" in c.args[0]
-    ]
-    assert len(put_calls) >= 1
-
-
-@patch("basic_agent.agent.get_provider")
-@patch("basic_agent.memory.psycopg")
-def test_memory_update_false_skips_update(mock_psycopg, mock_get_provider):
-    """Verify that no second LLM call is made when memory_update=False."""
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = (
-        {"name": "Alice", "language": "en", "preferences": ""},
-    )
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-    mock_provider = MagicMock()
-    mock_provider.provider_name = "anthropic"
-    mock_provider.model_name = "claude-sonnet-4-20250514"
-    mock_provider.chat.return_value = ProviderResponse(
-        text="Hello Alice!",
-        tool_calls=[],
-        usage=Usage(input_tokens=10, output_tokens=5),
-    )
-    mock_get_provider.return_value = mock_provider
-
-    memory = Memory(agent_id="test-bot", schema=UserContext, dsn="postgresql://test")
-    agent = Agent(provider="anthropic", system="Be helpful.", memory=memory)
-    result = agent.run("Hi", memory_id="user-123", memory_update=False)
-
-    assert result == "Hello Alice!"
-    # Only one provider.chat call (no memory update call)
-    assert mock_provider.chat.call_count == 1
-
-
 # ---- Parallel tool execution tests ----
 
 
@@ -488,3 +290,61 @@ def test_agent_parallel_tool_execution(mock_get_provider):
     assert tool_results[0]["content"] == "5"
     assert tool_results[1]["tool_use_id"] == "call_mul"
     assert tool_results[1]["content"] == "20"
+
+
+# ---- RunResult / last_run tracking tests ----
+
+
+@patch("basic_agent.agent.get_provider")
+def test_last_run_populated_simple(mock_get_provider):
+    """Verify last_run is populated after a simple (no tool) run."""
+    mock_provider = MagicMock()
+    mock_provider.provider_name = "anthropic"
+    mock_provider.model_name = "claude-sonnet-4-20250514"
+    mock_provider.chat.return_value = ProviderResponse(
+        text="Hello!",
+        tool_calls=[],
+        usage=Usage(input_tokens=10, output_tokens=5),
+    )
+    mock_get_provider.return_value = mock_provider
+
+    agent = Agent(provider="anthropic")
+    result = agent.run("Hi")
+
+    assert result == "Hello!"
+    assert agent.last_run is not None
+    assert isinstance(agent.last_run, RunResult)
+    assert agent.last_run.output == "Hello!"
+    assert agent.last_run.usage.input_tokens == 10
+    assert agent.last_run.usage.output_tokens == 5
+    assert agent.last_run.provider_calls == 1
+
+
+@patch("basic_agent.agent.get_provider")
+def test_last_run_populated_tool_use(mock_get_provider):
+    """Verify last_run accumulates tokens across tool-use loop iterations."""
+    mock_provider = MagicMock()
+    mock_provider.provider_name = "anthropic"
+    mock_provider.model_name = "claude-sonnet-4-20250514"
+
+    first_response = ProviderResponse(
+        text=None,
+        tool_calls=[ToolCall(id="call_1", name="add_numbers", input={"a": 2, "b": 3})],
+        usage=Usage(input_tokens=20, output_tokens=10),
+    )
+    second_response = ProviderResponse(
+        text="The sum is 5.",
+        tool_calls=[],
+        usage=Usage(input_tokens=30, output_tokens=15),
+    )
+    mock_provider.chat.side_effect = [first_response, second_response]
+    mock_get_provider.return_value = mock_provider
+
+    agent = Agent(provider="anthropic", tools=[add_numbers])
+    result = agent.run("What is 2 + 3?")
+
+    assert result == "The sum is 5."
+    assert agent.last_run is not None
+    assert agent.last_run.usage.input_tokens == 50  # 20 + 30
+    assert agent.last_run.usage.output_tokens == 25  # 10 + 15
+    assert agent.last_run.provider_calls == 2

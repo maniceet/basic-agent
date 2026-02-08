@@ -2,12 +2,15 @@
 
 from unittest.mock import MagicMock, patch
 
+import anthropic
+import openai
 import pytest
 
 from basic_agent.provider import (
     AnthropicProvider,
     OpenAIProvider,
     ProviderResponse,
+    _retryable_chat,
     _to_anthropic_tool_choice,
     _to_anthropic_tools,
     _to_openai_tool_choice,
@@ -200,3 +203,74 @@ def test_openai_chat_tool_call(mock_openai_module):
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].name == "get_weather"
     assert result.tool_calls[0].input == {"city": "Tokyo"}
+
+
+# --- _retryable_chat ---
+
+@patch("basic_agent.provider.time.sleep")
+def test_retryable_chat_succeeds_on_second_attempt(mock_sleep):
+    """Rate limit (429) on first try, success on second."""
+    mock_response = MagicMock()
+
+    call_fn = MagicMock(side_effect=[
+        anthropic.RateLimitError(
+            message="rate limit",
+            response=MagicMock(status_code=429),
+            body=None,
+        ),
+        mock_response,
+    ])
+
+    result = _retryable_chat(call_fn, max_retries=3)
+    assert result is mock_response
+    assert call_fn.call_count == 2
+    mock_sleep.assert_called_once_with(1)  # 2^0 = 1
+
+
+@patch("basic_agent.provider.time.sleep")
+def test_retryable_chat_raises_after_max_retries(mock_sleep):
+    """Server error (500) on every try — raises after exhausting retries."""
+    exc = anthropic.InternalServerError(
+        message="server error",
+        response=MagicMock(status_code=500),
+        body=None,
+    )
+    call_fn = MagicMock(side_effect=[exc, exc, exc])
+
+    with pytest.raises(anthropic.InternalServerError):
+        _retryable_chat(call_fn, max_retries=3)
+
+    assert call_fn.call_count == 3
+    # Sleeps between attempts: 1s then 2s (not after last failure)
+    assert mock_sleep.call_count == 2
+
+
+@patch("basic_agent.provider.time.sleep")
+def test_retryable_chat_no_retry_on_auth_error(mock_sleep):
+    """Auth error (401) propagates immediately without retries."""
+    exc = anthropic.AuthenticationError(
+        message="auth error",
+        response=MagicMock(status_code=401),
+        body=None,
+    )
+    call_fn = MagicMock(side_effect=exc)
+
+    with pytest.raises(anthropic.AuthenticationError):
+        _retryable_chat(call_fn, max_retries=3)
+
+    assert call_fn.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+@patch("basic_agent.provider.time.sleep")
+def test_retryable_chat_connection_error(mock_sleep):
+    """Connection error retries and eventually succeeds."""
+    mock_response = MagicMock()
+    call_fn = MagicMock(side_effect=[
+        anthropic.APIConnectionError(request=MagicMock()),
+        mock_response,
+    ])
+
+    result = _retryable_chat(call_fn, max_retries=3)
+    assert result is mock_response
+    assert call_fn.call_count == 2

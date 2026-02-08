@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -38,6 +39,32 @@ class ProviderResponse:
     tool_calls: List[ToolCall] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     raw: Any = None
+
+
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def _retryable_chat(call_fn: Any, max_retries: int = 3) -> Any:
+    """Call call_fn() with automatic retries on transient errors.
+
+    Retries on rate-limit (429), server errors (5xx), and connection errors
+    with exponential backoff (1s, 2s, 4s). Non-retryable errors propagate
+    immediately.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(max_retries):
+        try:
+            return call_fn()
+        except (anthropic.APIConnectionError, openai.APIConnectionError) as exc:
+            last_exc = exc
+        except (anthropic.APIStatusError, openai.APIStatusError) as exc:
+            if exc.status_code not in _RETRYABLE_STATUS_CODES:
+                raise
+            last_exc = exc
+        # Exponential backoff: 1s, 2s, 4s
+        if attempt < max_retries - 1:
+            time.sleep(2**attempt)
+    raise last_exc  # type: ignore[misc]
 
 
 class Provider(Protocol):
@@ -150,7 +177,7 @@ class AnthropicProvider:
         if temperature is not None:
             kwargs["temperature"] = temperature
 
-        response = self._client.messages.create(**kwargs)
+        response = _retryable_chat(lambda: self._client.messages.create(**kwargs))
 
         text = None
         tool_calls: List[ToolCall] = []
@@ -211,7 +238,9 @@ class OpenAIProvider:
         if temperature is not None:
             kwargs["temperature"] = temperature
 
-        response = self._client.chat.completions.create(**kwargs)
+        response = _retryable_chat(
+            lambda: self._client.chat.completions.create(**kwargs)
+        )
 
         message = response.choices[0].message
         text = message.content

@@ -1,8 +1,8 @@
-"""Agent with persistent memory — auto-loads into system prompt and auto-updates after each run."""
+"""Standalone Memory usage — store and retrieve structured data with Redis."""
 
 from pydantic import BaseModel
 
-from basic_agent import Agent, Memory
+from basic_agent import Memory
 
 
 class UserContext(BaseModel):
@@ -13,48 +13,33 @@ class UserContext(BaseModel):
     preferences: str = ""
 
 
-# Create a memory instance with a custom update prompt
+# Create a memory instance scoped to a namespace
 memory = Memory(
-    dsn="postgresql://user:pass@localhost:5432/basic_agent",
-    agent_id="support-bot",
+    url="redis://localhost:6379",
+    namespace="support-bot",
     schema=UserContext,
-    memory_prompt="Based on the conversation, update the user's name, language, and preferences.",
 )
 
-# Create an agent with memory attached
-agent = Agent(
-    provider="anthropic",
-    system="You are a helpful support assistant. Be concise.",
-    memory=memory,
-)
+# Store a memory item
+memory.put("user-123", UserContext(name="Alice", language="fr", preferences="concise answers"))
+print("Stored memory for user-123")
 
-# First run — no existing memory for this user yet.
-# After the run, memory is automatically extracted and stored.
-result = agent.run(
-    "Hi, I'm Alice. I prefer concise answers in French.",
-    memory_id="user-123",
-)
-print(f"Agent: {result}")
+# Retrieve it back
+item = memory.get("user-123")
+if item:
+    print(f"Retrieved: name={item.name}, language={item.language}, preferences={item.preferences}")
 
-# Verify memory was stored
-stored = memory.get("user-123")
-if stored:
-    print(f"Stored memory: name={stored.name}, language={stored.language}, preferences={stored.preferences}")
+# List all items for this namespace + schema
+all_items = memory.list()
+print(f"Total items: {len(all_items)}")
 
-# Second run — memory is auto-loaded into the system prompt
-result = agent.run(
-    "What did I say my name was?",
-    memory_id="user-123",
-)
-print(f"Agent: {result}")
+# Delete the item
+memory.delete("user-123")
+print("Deleted user-123")
 
-# You can also disable memory updates for read-only runs
-result = agent.run(
-    "Just a quick question, no need to remember this.",
-    memory_id="user-123",
-    memory_update=False,
-)
-print(f"Agent: {result}")
+# Verify deletion
+assert memory.get("user-123") is None
+print("Confirmed deletion")
 
 # Clean up
 memory.close()

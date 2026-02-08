@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import enum
 import inspect
-import json
-from typing import Any, Callable, Dict, List, get_type_hints
+import types
+from typing import Any, Callable, Dict, List, Literal, Union, get_args, get_origin, get_type_hints
+
+from pydantic import BaseModel
 
 _PYTHON_TYPE_TO_JSON: Dict[type, str] = {
     str: "string",
@@ -16,13 +19,75 @@ _PYTHON_TYPE_TO_JSON: Dict[type, str] = {
 }
 
 
-def _python_type_to_json_schema(tp: type) -> Dict[str, Any]:
+def _python_type_to_json_schema(tp: Any) -> Dict[str, Any]:
     """Convert a Python type annotation to a JSON Schema type."""
+    # Direct primitive match
     json_type = _PYTHON_TYPE_TO_JSON.get(tp)
     if json_type is not None:
         return {"type": json_type}
+
+    origin = get_origin(tp)
+    args = get_args(tp)
+
+    # Optional[X] / X | None  →  unwrap to schema of X
+    if _is_optional(tp, origin, args):
+        inner = [a for a in args if a is not type(None)][0]
+        return _python_type_to_json_schema(inner)
+
+    # Union[X, Y] (non-Optional) → anyOf
+    if origin is Union:
+        return {"anyOf": [_python_type_to_json_schema(a) for a in args]}
+
+    # list[X] → {"type": "array", "items": ...}
+    if origin is list:
+        if args:
+            return {"type": "array", "items": _python_type_to_json_schema(args[0])}
+        return {"type": "array"}
+
+    # dict[str, X] → {"type": "object", "additionalProperties": ...}
+    if origin is dict:
+        if args and len(args) == 2:
+            return {"type": "object", "additionalProperties": _python_type_to_json_schema(args[1])}
+        return {"type": "object"}
+
+    # Literal["a", "b"] → {"type": ..., "enum": [...]}
+    if origin is Literal:
+        values = list(args)
+        inferred_type = _infer_literal_type(values)
+        return {"type": inferred_type, "enum": values}
+
+    # Enum subclass → {"type": "string", "enum": [member.value ...]}
+    if isinstance(tp, type) and issubclass(tp, enum.Enum):
+        return {"type": "string", "enum": [m.value for m in tp]}
+
+    # Pydantic BaseModel subclass → model_json_schema()
+    if isinstance(tp, type) and issubclass(tp, BaseModel):
+        return tp.model_json_schema()
+
     # Fallback for unknown types
     return {"type": "string"}
+
+
+def _is_optional(tp: Any, origin: Any, args: Any) -> bool:
+    """Check if a type is Optional[X] or X | None."""
+    if origin is Union and type(None) in args and len(args) == 2:
+        return True
+    # Python 3.10+ union syntax: X | None
+    _union_type = getattr(types, "UnionType", None)
+    if _union_type is not None and isinstance(tp, _union_type) and type(None) in args and len(args) == 2:
+        return True
+    return False
+
+
+def _infer_literal_type(values: list[Any]) -> str:
+    """Infer the JSON Schema type from Literal values."""
+    if all(isinstance(v, int) for v in values):
+        return "integer"
+    if all(isinstance(v, (int, float)) for v in values):
+        return "number"
+    if all(isinstance(v, bool) for v in values):
+        return "boolean"
+    return "string"
 
 
 def _build_parameters_schema(func: Callable[..., Any]) -> Dict[str, Any]:

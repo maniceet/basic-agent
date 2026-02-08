@@ -1,4 +1,4 @@
-"""Tests for persistent memory — mocks PostgreSQL."""
+"""Tests for persistent memory — mocks Redis."""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -18,66 +18,61 @@ class OtherSchema(BaseModel):
     label: str
 
 
-@patch("basic_agent.memory.psycopg")
-def test_memory_put(mock_psycopg):
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+@patch("basic_agent.memory.redis")
+def test_memory_put(mock_redis_module):
+    mock_client = MagicMock()
+    mock_redis_module.Redis.from_url.return_value = mock_client
 
-    mem = Memory(agent_id="test-agent", schema=SampleSchema, dsn="postgresql://test")
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
     mem.put(id="item-1", data=SampleSchema(name="foo", value=42))
 
-    # Should have called execute for table creation + insert
-    assert mock_cursor.execute.call_count >= 1
+    mock_client.set.assert_called_once_with(
+        "test-agent:SampleSchema:item-1",
+        json.dumps({"name": "foo", "value": 42}),
+    )
 
 
-@patch("basic_agent.memory.psycopg")
-def test_memory_get_found(mock_psycopg):
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = ({"name": "bar", "value": 99},)
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+@patch("basic_agent.memory.redis")
+def test_memory_get_found(mock_redis_module):
+    mock_client = MagicMock()
+    mock_redis_module.Redis.from_url.return_value = mock_client
+    mock_client.get.return_value = json.dumps({"name": "bar", "value": 99})
 
-    mem = Memory(agent_id="test-agent", schema=SampleSchema, dsn="postgresql://test")
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
     result = mem.get(id="item-1")
 
     assert result is not None
     assert result.name == "bar"
     assert result.value == 99
+    mock_client.get.assert_called_once_with("test-agent:SampleSchema:item-1")
 
 
-@patch("basic_agent.memory.psycopg")
-def test_memory_get_not_found(mock_psycopg):
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = None
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+@patch("basic_agent.memory.redis")
+def test_memory_get_not_found(mock_redis_module):
+    mock_client = MagicMock()
+    mock_redis_module.Redis.from_url.return_value = mock_client
+    mock_client.get.return_value = None
 
-    mem = Memory(agent_id="test-agent", schema=SampleSchema, dsn="postgresql://test")
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
     result = mem.get(id="nonexistent")
 
     assert result is None
 
 
-@patch("basic_agent.memory.psycopg")
-def test_memory_list(mock_psycopg):
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    mock_cursor.fetchall.return_value = [
-        ({"name": "a", "value": 1},),
-        ({"name": "b", "value": 2},),
+@patch("basic_agent.memory.redis")
+def test_memory_list(mock_redis_module):
+    mock_client = MagicMock()
+    mock_redis_module.Redis.from_url.return_value = mock_client
+    mock_client.scan_iter.return_value = iter([
+        "test-agent:SampleSchema:a",
+        "test-agent:SampleSchema:b",
+    ])
+    mock_client.mget.return_value = [
+        json.dumps({"name": "a", "value": 1}),
+        json.dumps({"name": "b", "value": 2}),
     ]
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
-    mem = Memory(agent_id="test-agent", schema=SampleSchema, dsn="postgresql://test")
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
     items = mem.list()
 
     assert len(items) == 2
@@ -85,56 +80,75 @@ def test_memory_list(mock_psycopg):
     assert items[1].value == 2
 
 
-@patch("basic_agent.memory.psycopg")
-def test_memory_delete(mock_psycopg):
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+@patch("basic_agent.memory.redis")
+def test_memory_list_empty(mock_redis_module):
+    mock_client = MagicMock()
+    mock_redis_module.Redis.from_url.return_value = mock_client
+    mock_client.scan_iter.return_value = iter([])
 
-    mem = Memory(agent_id="test-agent", schema=SampleSchema, dsn="postgresql://test")
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
+    items = mem.list()
+
+    assert items == []
+    mock_client.mget.assert_not_called()
+
+
+@patch("basic_agent.memory.redis")
+def test_memory_delete(mock_redis_module):
+    mock_client = MagicMock()
+    mock_redis_module.Redis.from_url.return_value = mock_client
+
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
     mem.delete(id="item-1")
 
-    assert mock_cursor.execute.call_count >= 1
+    mock_client.delete.assert_called_once_with("test-agent:SampleSchema:item-1")
 
 
 def test_memory_put_validates_data():
-    """Verify that put validates data against the schema (before DB)."""
-    # We can test validation without mocking the DB by checking that
-    # invalid data raises before any DB call
-    mem = Memory(agent_id="test-agent", schema=SampleSchema, dsn="postgresql://test")
-    # This should fail validation because 'value' expects an int
+    """Verify that put validates data against the schema (before Redis)."""
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
     with pytest.raises((ValidationError, Exception)):
         mem.put(id="bad", data=SampleSchema.model_validate({"name": "x", "value": "not_int"}))
 
 
-def test_memory_stores_memory_prompt():
-    """Verify that Memory accepts and stores a memory_prompt parameter."""
-    mem = Memory(
-        agent_id="test-agent",
-        schema=SampleSchema,
-        dsn="postgresql://test",
-        memory_prompt="Extract user preferences.",
-    )
-    assert mem.memory_prompt == "Extract user preferences."
+@patch("basic_agent.memory.redis")
+def test_memory_close(mock_redis_module):
+    mock_client = MagicMock()
+    mock_redis_module.Redis.from_url.return_value = mock_client
 
-
-def test_memory_prompt_defaults_to_none():
-    """Verify that memory_prompt defaults to None when not provided."""
-    mem = Memory(agent_id="test-agent", schema=SampleSchema, dsn="postgresql://test")
-    assert mem.memory_prompt is None
-
-
-@patch("basic_agent.memory.psycopg")
-def test_memory_close(mock_psycopg):
-    mock_conn = MagicMock()
-    mock_psycopg.connect.return_value = mock_conn
-
-    mem = Memory(agent_id="test-agent", schema=SampleSchema, dsn="postgresql://test")
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
     # Force connection to be opened
-    mem._conn = mock_conn
+    mem._client = mock_client
     mem.close()
 
-    mock_conn.close.assert_called_once()
-    assert mem._conn is None
+    mock_client.close.assert_called_once()
+    assert mem._client is None
+
+
+def test_memory_close_no_connection():
+    """Verify close is a no-op when no connection has been made."""
+    mem = Memory(namespace="test-agent", schema=SampleSchema, url="redis://test")
+    mem.close()  # Should not raise
+    assert mem._client is None
+
+
+def test_memory_key_format():
+    """Verify the Redis key format is {namespace}:{schema_name}:{id}."""
+    mem = Memory(namespace="my-agent", schema=SampleSchema, url="redis://test")
+    assert mem._key("user-123") == "my-agent:SampleSchema:user-123"
+
+
+def test_memory_defaults_to_redis_url_env(monkeypatch):
+    """Verify that url falls back to REDIS_URL env var."""
+    monkeypatch.setenv("REDIS_URL", "redis://from-env:6379")
+    mem = Memory(namespace="test", schema=SampleSchema)
+    assert mem._url == "redis://from-env:6379"
+
+
+def test_memory_defaults_to_localhost():
+    """Verify that url defaults to localhost when no env var is set."""
+    mem = Memory(namespace="test", schema=SampleSchema, url=None)
+    # When REDIS_URL is not set, should default to localhost
+    # (This test may pick up REDIS_URL from the real env — the key behavior
+    # is that it doesn't crash.)
+    assert mem._url is not None

@@ -2,7 +2,7 @@
 
 [![codecov](https://codecov.io/gh/maniceet/basic-agent/graph/badge.svg)](https://codecov.io/gh/maniceet/basic-agent)
 
-A reusable Python library for building LLM-powered agents. Connect to Anthropic or OpenAI with a single interface, register Python functions as tools, return structured outputs validated with Pydantic, persist conversational memory in PostgreSQL, and trace every LLM call with OpenTelemetry.
+A reusable Python library for building LLM-powered agents. Connect to Anthropic or OpenAI with a single interface, register Python functions as tools, return structured outputs validated with Pydantic, and persist conversational memory in Redis.
 
 ```
 pip install basic-agent
@@ -20,7 +20,6 @@ Requires Python >= 3.9. Dependencies managed with [uv](https://docs.astral.sh/uv
 - [Structured Output](#structured-output)
 - [Persistent Memory](#persistent-memory)
 - [Jinja2 System Prompts](#jinja2-system-prompts)
-- [OpenTelemetry Tracing](#opentelemetry-tracing)
 - [Agent API Reference](#agent-api-reference)
 - [Project Structure](#project-structure)
 - [Development](#development)
@@ -47,6 +46,7 @@ Set your API key in the environment or a `.env` file:
 ```
 ANTHROPIC_API_KEY=your-key-here
 OPENAI_API_KEY=your-key-here
+REDIS_URL=redis://localhost:6379
 ```
 
 ---
@@ -73,6 +73,8 @@ Both providers produce a `ProviderResponse` containing:
 | `raw` | `Any` | Original SDK response for debugging |
 
 Tool schemas, tool choice, and message formats are automatically translated to each SDK's expected format.
+
+All provider calls include automatic retry logic with exponential backoff (1s, 2s, 4s) for rate limits (429) and server errors (5xx).
 
 ---
 
@@ -108,7 +110,7 @@ The decorator extracts:
 - Docstring as the tool `description`
 - Type-hinted parameters as JSON Schema `parameters`
 
-Supported types: `str`, `int`, `float`, `bool`, `list`, `dict`.
+Supported types: `str`, `int`, `float`, `bool`, `list[X]`, `dict[str, X]`, `Optional[X]`, `Union[X, Y]`, `Literal["a", "b"]`, `enum.Enum` subclasses, and Pydantic `BaseModel` subclasses.
 
 When the LLM returns multiple tool calls in a single response, all tools are executed in parallel using a thread pool (up to 10 concurrent workers).
 
@@ -149,11 +151,11 @@ The return value is a fully validated Pydantic instance, not a dict or raw JSON.
 
 ## Persistent Memory
 
-Store and retrieve per-user context in PostgreSQL using JSONB. Memory is scoped by agent ID and validated through a Pydantic schema on every read and write.
+Store and retrieve structured data in Redis, validated through a Pydantic schema on every read and write. Memory is a standalone component — use it independently or alongside an agent.
 
 ```python
 from pydantic import BaseModel
-from basic_agent import Agent, Memory
+from basic_agent import Memory
 
 class UserContext(BaseModel):
     name: str = ""
@@ -161,68 +163,33 @@ class UserContext(BaseModel):
     preferences: str = ""
 
 memory = Memory(
-    dsn="postgresql://user:pass@localhost:5432/basic_agent",
-    agent_id="support-bot",
+    namespace="support-bot",
     schema=UserContext,
-    memory_prompt="Based on the conversation, update the user's name, language, and preferences.",
+    url="redis://localhost:6379",   # optional, defaults to REDIS_URL env var
 )
 
-agent = Agent(
-    provider="anthropic",
-    system="You are a helpful support assistant.",
-    memory=memory,
-)
+# Store (validates through Pydantic before writing)
+memory.put("user-123", UserContext(name="Alice", language="fr", preferences="concise answers"))
 
-# First run — memory is auto-extracted and stored after the conversation
-result = agent.run(
-    "Hi, I'm Alice. I prefer concise answers in French.",
-    memory_id="user-123",
-)
+# Retrieve — returns a validated Pydantic instance or None
+item = memory.get("user-123")
 
-# Second run — memory is auto-loaded into the system prompt
-result = agent.run(
-    "What did I say my name was?",
-    memory_id="user-123",
-)
+# List all items for this namespace + schema
+items = memory.list()
 
-# Disable auto-update for read-only runs
-result = agent.run(
-    "Just a quick question.",
-    memory_id="user-123",
-    memory_update=False,
-)
+# Delete
+memory.delete("user-123")
 
+# Close connection
 memory.close()
 ```
 
 ### How memory works
 
-1. **On load**: When `memory_id` is passed to `agent.run()`, the agent retrieves the stored memory and prepends it to the system prompt as `<memory>JSON</memory>`.
-2. **On update**: After the main conversation loop, a second LLM call extracts updated context from the conversation and writes it back using structured output forced to the memory schema.
-3. **Opt-out**: Set `memory_update=False` to skip the extraction step.
-
-### Memory API
-
-```python
-memory.put(id="user-123", data=UserContext(name="Alice", language="fr"))
-item = memory.get(id="user-123")       # Returns UserContext or None
-items = memory.list()                   # All items for this agent + schema
-memory.delete(id="user-123")
-memory.close()
-```
-
-The database table is auto-created on first use:
-
-```sql
-CREATE TABLE IF NOT EXISTS memory (
-    id          TEXT PRIMARY KEY,
-    agent_id    TEXT NOT NULL,
-    schema_name TEXT NOT NULL,
-    data        JSONB NOT NULL,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now()
-);
-```
+- **Key format**: `{namespace}:{schema_class_name}:{id}` (e.g. `support-bot:UserContext:user-123`)
+- **Validation**: All writes validate through `schema.model_validate()` before storing. All reads deserialize and validate back through the model.
+- **Lazy connection**: Redis connection is established on first operation, not at construction time.
+- **URL resolution**: Constructor `url` param > `REDIS_URL` env var > `redis://localhost:6379`.
 
 ---
 
@@ -257,56 +224,6 @@ result = agent.run(
 
 ---
 
-## OpenTelemetry Tracing
-
-Opt-in tracing instruments every LLM call with spans following the [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
-
-```python
-from basic_agent import Agent, setup_tracing, tool
-
-setup_tracing(service_name="my-app")
-
-@tool
-def calculate(expression: str) -> str:
-    """Evaluate a mathematical expression."""
-    return str(eval(expression))
-
-agent = Agent(
-    provider="anthropic",
-    system="You are a helpful math assistant.",
-    tools=[calculate],
-    trace=True,
-)
-
-response = agent.run("What is 42 * 17 + 3?")
-```
-
-### Recorded span data
-
-**Attributes:**
-
-| Attribute | Description |
-|---|---|
-| `gen_ai.system` | `"anthropic"` or `"openai"` |
-| `gen_ai.request.model` | Model name |
-| `gen_ai.request.temperature` | Temperature (if set) |
-| `gen_ai.request.max_tokens` | Max tokens (if set) |
-| `gen_ai.usage.input_tokens` | Total input tokens |
-| `gen_ai.usage.output_tokens` | Total output tokens |
-
-**Events:**
-
-| Event | Description |
-|---|---|
-| `gen_ai.user.message` | User message content |
-| `gen_ai.assistant.message` | Assistant response content |
-| `gen_ai.tool.call` | Tool name and input |
-| `gen_ai.tool.result` | Tool name and output |
-
-By default, `setup_tracing()` uses a console exporter. Pass a custom `exporter` argument to send spans to any OTLP-compatible backend (Jaeger, Grafana, etc.).
-
----
-
 ## Agent API Reference
 
 ### Constructor
@@ -318,8 +235,6 @@ Agent(
     system="You are a helpful assistant.",
     tools=None,                        # List of @tool-decorated functions
     output_type=None,                  # Pydantic BaseModel for structured output
-    memory=None,                       # Memory instance
-    trace=False,                       # Enable OpenTelemetry tracing
     max_tokens=4096,                   # Max response tokens
     temperature=None,                  # LLM temperature
     max_iterations=10,                 # Max tool-use loop iterations
@@ -332,22 +247,30 @@ Agent(
 result = agent.run(
     message,                           # User message (str)
     deps=None,                         # Pydantic model for Jinja2 template injection
-    memory_id=None,                    # Load/store memory for this ID
-    memory_update=True,                # Auto-extract memory after run
 )
 ```
 
 Returns a `str` (plain text) or a validated Pydantic model instance if `output_type` is set.
 
+### `agent.last_run`
+
+After calling `run()`, `agent.last_run` is a `RunResult` dataclass:
+
+```python
+@dataclass
+class RunResult:
+    output: Any           # str or Pydantic model instance
+    usage: Usage          # total tokens (input_tokens, output_tokens)
+    provider_calls: int   # number of chat() API calls made
+```
+
 ### Execution flow
 
-1. Load memory for `memory_id` (if provided)
-2. Render system prompt (Jinja2 templates + memory prepend)
-3. Call provider with message and tool definitions
-4. If tool calls returned: execute tools in parallel, append results, loop back to step 3
-5. If `output_type` is set: validate response through the Pydantic model
-6. If `memory_update` is enabled: second LLM call extracts updated memory
-7. Return result
+1. Render system prompt (Jinja2 templates with `deps` if provided)
+2. Call provider with message and tool definitions
+3. If tool calls returned: execute tools in parallel, append results, loop back to step 2
+4. If `output_type` is set: validate response through the Pydantic model
+5. Return result and populate `last_run`
 
 ---
 
@@ -359,27 +282,32 @@ basic-agent/
 ├── uv.lock
 ├── src/
 │   └── basic_agent/
-│       ├── __init__.py         # Public API: Agent, Memory, tool, setup_tracing
-│       ├── agent.py            # Core agent loop with tool execution and memory
+│       ├── __init__.py         # Public API: Agent, RunResult, Memory, tool
+│       ├── agent.py            # Core agent loop with tool execution
 │       ├── provider.py         # Anthropic/OpenAI provider abstraction
 │       ├── tools.py            # @tool decorator and schema generation
 │       ├── models.py           # Structured output (Pydantic -> tool schema)
-│       ├── memory.py           # PostgreSQL JSONB memory layer
-│       └── tracing.py          # OpenTelemetry instrumentation
+│       └── memory.py           # Redis-backed persistent memory
 ├── examples/
 │   ├── simple_chat.py          # Minimal agent
 │   ├── tool_use.py             # Agent with custom tools
 │   ├── structured_output.py    # Pydantic-validated output
 │   ├── jinja_template.py       # Jinja2 system prompt with deps
-│   ├── with_memory.py          # Persistent memory
-│   └── with_tracing.py         # OpenTelemetry tracing
+│   └── with_memory.py          # Persistent memory with Redis
+├── docs/                       # Detailed documentation
+│   ├── overview.md
+│   ├── agent.md
+│   ├── tools.md
+│   ├── providers.md
+│   ├── memory.md
+│   ├── structured-output.md
+│   └── examples.md
 └── tests/
     ├── test_agent.py
     ├── test_provider.py
     ├── test_tools.py
     ├── test_models.py
-    ├── test_memory.py
-    └── test_tracing.py
+    └── test_memory.py
 ```
 
 ---
